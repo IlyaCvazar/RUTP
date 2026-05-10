@@ -1,7 +1,6 @@
 # RUTP – Reliable UDP Transport Protocol
 =======
 # RUTP — Reliable UDP Transport Protocol
->>>>>>> 4fac83c (Update README.md)
 
 **RUTP** is a custom reliable transport protocol over UDP, implemented in pure Python 3.7+ with `asyncio`.  
 It provides TCP-like reliability, congestion control, flow control, and selective acknowledgements, while remaining lightweight and embeddable.
