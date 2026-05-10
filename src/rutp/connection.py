@@ -105,7 +105,7 @@ class RUTPConnection:
 
     async def close(self) -> None:
         """Корректное закрытие соединения."""
-        if self._state in (ConnState.ESTABLISHED, ConnState.CLOSE_WAIT):
+        if self._state == ConnState.ESTABLISHED:
             fin = Packet(
                 type=TYPE_CONTROL,
                 flags=FLAG_FIN,
@@ -115,6 +115,16 @@ class RUTPConnection:
             self._send_packet(fin)
             self._sender._next_seq = (self._sender._next_seq + 1) % 2**32
             self._state = ConnState.FIN_WAIT_1
+        elif self._state == ConnState.CLOSE_WAIT:
+            fin = Packet(
+                type=TYPE_CONTROL,
+                flags=FLAG_FIN,
+                seq_num=self._sender._next_seq,
+                window=65535
+            )
+            self._send_packet(fin)
+            self._sender._next_seq = (self._sender._next_seq + 1) % 2**32
+            self._state = ConnState.LAST_ACK
         else:
             self._close_transport()
 
@@ -225,13 +235,29 @@ class RUTPConnection:
             self._state = ConnState.ESTABLISHED
         if pkt.flags & FLAG_FIN:
             self._peer_seq = pkt.seq_num
-            self._state = ConnState.CLOSE_WAIT
-            ack = Packet(type=TYPE_ACK, ack_num=(pkt.seq_num + 1) % 2**32,
-                         window=self._receiver.window_available())
-            self._send_packet(ack)
+            if self._state == ConnState.FIN_WAIT_1:
+                # Одновременное закрытие: переходим прямо в TIME_WAIT
+                self._state = ConnState.TIME_WAIT
+                ack = Packet(type=TYPE_ACK, ack_num=(pkt.seq_num + 1) % 2**32,
+                             window=self._receiver.window_available())
+                self._send_packet(ack)
+                self._close_transport()
+            elif self._state == ConnState.FIN_WAIT_2:
+                # FIN получен, пока мы ждали ACK для нашего FIN → TIME_WAIT
+                self._state = ConnState.TIME_WAIT
+                ack = Packet(type=TYPE_ACK, ack_num=(pkt.seq_num + 1) % 2**32,
+                             window=self._receiver.window_available())
+                self._send_packet(ack)
+                self._close_transport()
+            else:
+                # ESTABLISHED, CLOSE_WAIT и т.д.
+                self._state = ConnState.CLOSE_WAIT
+                ack = Packet(type=TYPE_ACK, ack_num=(pkt.seq_num + 1) % 2**32,
+                             window=self._receiver.window_available())
+                self._send_packet(ack)
             return
         if pkt.type == TYPE_ACK:
-            # Извлечение SACK-блоков
+            # ... (остальной код обработки ACK без изменений)
             sack_blocks = []
             if len(pkt.payload) >= 8:
                 import struct
@@ -242,6 +268,12 @@ class RUTPConnection:
             self._sender.on_ack(pkt.ack_num, pkt.window, sack_blocks)
             self._peer_window = pkt.window
             self._keepalive.start()
+
+            if self._state == ConnState.FIN_WAIT_1:
+                self._state = ConnState.FIN_WAIT_2
+            elif self._state == ConnState.LAST_ACK:
+                self._close_transport()
+
         elif pkt.type == TYPE_DATA:
             ack = self._receiver.process_packet(pkt)
             if ack:
