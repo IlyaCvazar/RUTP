@@ -431,6 +431,7 @@ Test server listening on port 46677
   ✓ Medium echo (1500 bytes): correct
   ✓ Large file (100000 bytes): SHA‑256 matches
   ✓ Close: client state = FIN_WAIT_2
+  ```
 
 ========================================
 Total: 5 passed, 0 failed
