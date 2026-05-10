@@ -1,5 +1,3 @@
-# RUTP – Reliable UDP Transport Protocol
-=======
 # RUTP — Reliable UDP Transport Protocol
 
 **RUTP** is a custom reliable transport protocol over UDP, implemented in pure Python 3.7+ with `asyncio`.  
@@ -14,8 +12,9 @@ It provides TCP-like reliability, congestion control, flow control, and selectiv
 - **Keep‑alive** – periodic probes keep idle connections alive
 - **Asynchronous API** – built on `asyncio`, supports both client and server
 - **Pluggable parameters** – RTO, max retransmits, etc., configurable via environment variables
+
 ## Installation
-=======
+
 Requires Python 3.7 or later. No external dependencies.
 
 ```bash
@@ -92,27 +91,6 @@ async def main():
 
 asyncio.run(main())
 ```
-
-<<<<<<< HEAD
-## Documentation  
-Key classes and methods are summarised below:
-
-- **`RUTPConnection(loop, on_data=None)`** – main connection object. Methods: `listen(port)`, `connect(host, port)`, `send(data)`, `close()`.
-- **`Packet`** – serializable packet with fields: version, type, flags, seq_num, ack_num, window, payload.
-- **Constants** – protocol parameters in `rutp.constants`.
-
-## License
-
-This project is distributed under a custom license that requires **explicit attribution** – the protocol name **RUTP** and the creator's name must be visibly displayed in any product or service that uses or modifies this software. See [LICENSE.txt](LICENSE.txt) for full details.
-
-© 2026 Ilya [your surname]. All rights reserved.
-=======
-Запустите клиент в другом терминале:
-```bash
-python client.py
-```
-
-Вы должны увидеть эхо-ответ от сервера.
 
 ---
 
@@ -269,6 +247,8 @@ with open('myfile.bin', 'rb') as f:
 
 ## Тестирование
 
+### Unit-тесты
+
 В директории `tests/` находятся unit‑тесты. Установите `pytest` и запустите:
 
 ```bash
@@ -285,6 +265,179 @@ pytest tests/
 - Отправитель и его взаимодействие с окном получателя
 - Полное рукопожатие и передачу данных
 
+### Интеграционный тест
+
+Скрипт `TestScript.py` запускает эхо‑сервер и клиент в одном процессе и проверяет сквозную работу протокола:
+
+- Рукопожатие (ESTABLISHED)
+- Передачу короткого сообщения (меньше одного сегмента)
+- Передачу данных размером >1 сегмента
+- Передачу большого файла (100 КБ) с проверкой SHA‑256
+- Корректное завершение соединения (FIN‑ACK обмен)
+
+Запуск:
+
+```bash
+python TestScript.py
+```
+
+Пример успешного вывода:
+```import asyncio
+import hashlib
+import os
+import sys
+from rutp import RUTPConnection, ConnState
+
+PASS = 0
+FAIL = 0
+
+def check(condition, msg):
+    global PASS, FAIL
+    if condition:
+        PASS += 1
+        print(f"  ✓ {msg}")
+    else:
+        FAIL += 1
+        print(f"  ✗ {msg} FAILED")
+
+async def echo_server_handler(conn: RUTPConnection):
+    """Эхо-сервер, ожидающий полного завершения соединения."""
+    queue = asyncio.Queue()
+    conn.on_data = lambda data: queue.put_nowait(data)
+    try:
+        while conn._state not in (ConnState.CLOSE_WAIT, ConnState.CLOSED):
+            try:
+                data = await asyncio.wait_for(queue.get(), timeout=0.1)
+                conn.send(data)
+                await asyncio.sleep(0.01)
+            except asyncio.TimeoutError:
+                pass
+        # Получен FIN → закрываем серверную сторону и ждём завершения
+        if conn._state == ConnState.CLOSE_WAIT:
+            await conn.close()                    # отправляем FIN, переходим в LAST_ACK
+            # Ждём ACK на наш FIN (переход в CLOSED)
+            while conn._state != ConnState.CLOSED:
+                await asyncio.sleep(0.05)
+    except Exception:
+        pass
+
+async def run_server(port_future: asyncio.Future):
+    loop = asyncio.get_event_loop()
+    server = RUTPConnection(loop)
+    server.on_connection = echo_server_handler
+    await server.listen(0)
+    port = server._transport.get_extra_info('sockname')[1]
+    port_future.set_result(port)
+    try:
+        await asyncio.Event().wait()
+    except asyncio.CancelledError:
+        await server.close()
+
+async def test_client(port: int):
+    loop = asyncio.get_event_loop()
+    client = RUTPConnection(loop)
+
+    # 1. Рукопожатие
+    await client.connect('127.0.0.1', port)
+    await asyncio.sleep(0.1)
+    check(client._state == ConnState.ESTABLISHED,
+          "Handshake: client → ESTABLISHED")
+
+    # 2. Маленькое эхо
+    received = bytearray()
+    done = asyncio.Event()
+    client.on_data = lambda d: (received.extend(d), done.set())
+    msg_small = b"Hello, RUTP!"
+    client.send(msg_small)
+    await asyncio.wait_for(done.wait(), timeout=2.0)
+    check(received == msg_small,
+          f"Small echo: {received} == {msg_small}")
+    received.clear()
+    done.clear()
+
+    # 3. Средний объём (>1 сегмента)
+    msg_medium = os.urandom(1500)
+    def medium_collect(d):
+        nonlocal received
+        received.extend(d)
+        if len(received) >= len(msg_medium):
+            done.set()
+    client.on_data = medium_collect
+    client.send(msg_medium)
+    try:
+        await asyncio.wait_for(done.wait(), timeout=5.0)
+        check(received == msg_medium,
+              f"Medium echo ({len(msg_medium)} bytes): correct")
+    except asyncio.TimeoutError:
+        check(False, f"Medium echo: timeout (got {len(received)} of {len(msg_medium)} bytes)")
+    received.clear()
+    done.clear()
+
+    # 4. Большой файл (100 КБ)
+    msg_large = os.urandom(100_000)
+    checksum_orig = hashlib.sha256(msg_large).digest()
+    all_data = bytearray()
+    def large_collect(d):
+        nonlocal all_data
+        all_data.extend(d)
+        if len(all_data) >= len(msg_large):
+            done.set()
+    client.on_data = large_collect
+    client.send(msg_large)
+    try:
+        await asyncio.wait_for(done.wait(), timeout=20.0)
+        checksum_rcvd = hashlib.sha256(all_data).digest()
+        check(checksum_orig == checksum_rcvd,
+              f"Large file ({len(msg_large)} bytes): SHA‑256 matches")
+    except asyncio.TimeoutError:
+        check(False, f"Large file: timeout (got {len(all_data)} of {len(msg_large)} bytes)")
+    done.clear()
+
+    # 5. Закрытие соединения
+    await client.close()                      # клиент отправляет FIN
+    await asyncio.sleep(0.5)                  # ждём ответный FIN от сервера и завершение
+
+    # После полного обмена FIN-ACK клиент должен быть в одном из финальных состояний
+    check(client._state in (ConnState.FIN_WAIT_2, ConnState.TIME_WAIT, ConnState.CLOSED),
+          f"Close: client state = {client._state.name}")
+
+    print(f"\n{'='*40}")
+    print(f"Total: {PASS} passed, {FAIL} failed")
+    if FAIL:
+        sys.exit(1)
+
+async def main():
+    loop = asyncio.get_event_loop()
+    port_future = loop.create_future()
+
+    server_task = asyncio.create_task(run_server(port_future))
+    port = await port_future
+    print(f"Test server listening on port {port}")
+
+    await test_client(port)
+
+    server_task.cancel()
+    try:
+        await server_task
+    except asyncio.CancelledError:
+        pass
+
+if __name__ == "__main__":
+    asyncio.run(main())```
+```
+Test server listening on port 46677
+  ✓ Handshake: client → ESTABLISHED
+  ✓ Small echo: bytearray(b'Hello, RUTP!') == b'Hello, RUTP!'
+  ✓ Medium echo (1500 bytes): correct
+  ✓ Large file (100000 bytes): SHA‑256 matches
+  ✓ Close: client state = FIN_WAIT_2
+
+========================================
+Total: 5 passed, 0 failed
+```
+
+Если все пять проверок пройдены, библиотека полностью работоспособна на всех этапах соединения.
+
 ---
 
 ## Лицензия и атрибуция
@@ -297,7 +450,7 @@ pytest tests/
 Уведомление должно быть видимым для конечного пользователя (документация, интерфейс, экран загрузки и т.п.).  
 Полный текст лицензии: файл [LICENSE.txt](LICENSE.txt).
 
-© 2026 Илья Александрович. Все права защищены.
+© 2026 Илья Околелов. Все права защищены.
 
 ---
 
@@ -323,10 +476,9 @@ pytest tests/
 ├── pyproject.toml
 ├── LICENSE.txt
 └── README.md
+```
 
 ## Вопросы и обратная связь
 
 Если у вас возникли проблемы или предложения, создавайте issue в репозитории проекта.  
 Автор: Илья (github: IlyaCvazar)
->>>>>>> 4fac83c (Update README.md)
-```
