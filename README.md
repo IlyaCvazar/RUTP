@@ -1,5 +1,3 @@
-<<<<<<< HEAD
-```markdown
 # RUTP – Reliable UDP Transport Protocol
 =======
 # RUTP — Reliable UDP Transport Protocol
@@ -17,12 +15,8 @@ It provides TCP-like reliability, congestion control, flow control, and selectiv
 - **Keep‑alive** – periodic probes keep idle connections alive
 - **Asynchronous API** – built on `asyncio`, supports both client and server
 - **Pluggable parameters** – RTO, max retransmits, etc., configurable via environment variables
-
-<<<<<<< HEAD
 ## Installation
 =======
->>>>>>> 4fac83c (Update README.md)
-
 Requires Python 3.7 or later. No external dependencies.
 
 ```bash
