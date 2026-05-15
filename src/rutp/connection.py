@@ -1,11 +1,13 @@
 """
 Реализация конечного автомата соединения RUTP.
-Поддерживает рукопожатие, передачу данных, закрытие, проверку версии.
+Поддерживает рукопожатие, передачу данных, закрытие.
+Теперь RUTPConnection представляет одно соединение (клиент или серверная сторона).
+Для создания сервера используйте RUTPServer.
 """
 import asyncio
 import logging
 from enum import Enum
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 
 from .packet import Packet
 from .constants import (
@@ -17,7 +19,6 @@ from .constants import (
     FLAG_FIN,
     FLAG_RST,
     FLAG_ACK,
-    VERSION_SYN_BIT,
 )
 from .sender import Sender
 from .receiver import Receiver
@@ -27,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 class ConnState(Enum):
-    LISTEN = 1
+    CLOSED = 1
     SYN_SENT = 2
     SYN_RECEIVED = 3
     ESTABLISHED = 4
@@ -36,48 +37,51 @@ class ConnState(Enum):
     CLOSE_WAIT = 7
     LAST_ACK = 8
     TIME_WAIT = 9
-    CLOSED = 10
+
+
+class MaxRetransmitsExceeded(Exception):
+    pass
 
 
 class RUTPConnection:
-    def __init__(self, loop: asyncio.AbstractEventLoop,
-                 on_data: Optional[Callable[[bytes], None]] = None,
-                 on_error: Optional[Callable[[Exception], None]] = None) -> None:
+    """
+    Одно RUTP‑соединение.
+
+    Для клиента: используйте await connect(host, port)
+    Для сервера: экземпляр создаётся автоматически в RUTPServer, передаётся транспорт и адрес.
+    """
+
+    def __init__(self,
+                 loop: asyncio.AbstractEventLoop,
+                 transport: Optional[asyncio.DatagramTransport] = None,
+                 remote_addr: Optional[Tuple[str, int]] = None,
+                 on_data: Optional[Callable[[bytes], None]] = None):
         self._loop = loop
+        self._transport = transport          # может быть None до connect
+        self._remote_addr = remote_addr      # для серверных соединений
         self._state = ConnState.CLOSED
-        self._transport: Optional[asyncio.DatagramTransport] = None
-        self._protocol: Optional[asyncio.DatagramProtocol] = None
 
         self.on_data = on_data
-        self.on_error = on_error
-        self.on_connection: Optional[Callable[['RUTPConnection'], None]] = None
+        self.on_close: Optional[Callable[['RUTPConnection'], None]] = None
 
         self._sender: Optional[Sender] = None
         self._receiver: Optional[Receiver] = None
-
-        self._peer_seq = 0
-        self._peer_window = 65535
-        self._peer_addr = None
-        self._is_connected = False
-
         self._keepalive = KeepAliveTimer(loop, callback=self._send_keepalive)
-        self._connection_tasks = set()   # для отслеживания задач on_connection
 
-    # ----------------------------- Публичный API -----------------------------
-    async def listen(self, port: int) -> None:
-        self._state = ConnState.LISTEN
-        self._is_connected = False
-        self._transport, self._protocol = await self._loop.create_datagram_endpoint(
-            lambda: _RUTPProtocol(self), local_addr=('0.0.0.0', port)
-        )
+        # Для клиентского режима
+        self._client_mode = False
 
+    # ----------------------------- Публичный API (клиент) -----------------------------
     async def connect(self, host: str, port: int) -> None:
+        """Клиентское подключение к серверу."""
         self._init_components()
         self._state = ConnState.SYN_SENT
-        self._is_connected = True
-        self._transport, self._protocol = await self._loop.create_datagram_endpoint(
-            lambda: _RUTPProtocol(self), remote_addr=(host, port)
+        self._client_mode = True
+
+        self._transport, _ = await self._loop.create_datagram_endpoint(
+            lambda: _RUTPClientProtocol(self), remote_addr=(host, port)
         )
+
         syn = Packet(
             version=Packet.make_syn_version(),
             type=TYPE_CONTROL,
@@ -89,12 +93,14 @@ class RUTPConnection:
         self._sender._next_seq = (self._sender._next_seq + 1) % 2**32
 
     def send(self, data: bytes) -> None:
+        """Отправить данные (только в состоянии ESTABLISHED)."""
         if self._state == ConnState.ESTABLISHED and self._sender:
             self._sender.send(data)
         else:
             logger.warning("Cannot send data in state %s", self._state)
 
     async def close(self) -> None:
+        """Корректное закрытие соединения."""
         if self._state == ConnState.ESTABLISHED:
             fin = Packet(
                 type=TYPE_CONTROL,
@@ -120,42 +126,51 @@ class RUTPConnection:
         else:
             self._close_transport()
 
-    def _close_transport(self) -> None:
-        # Отменить все фоновые задачи on_connection
-        for task in self._connection_tasks:
-            task.cancel()
-        self._connection_tasks.clear()
-        if self._transport:
-            self._transport.close()
-        self._state = ConnState.CLOSED
+    def abort(self) -> None:
+        """Принудительно закрыть соединение (RST не отправляется)."""
+        self._close_transport()
 
-    # --------------------------- Внутренние методы ---------------------------
+    # ----------------------------- Методы для серверной стороны -----------------------------
+    def set_transport(self, transport: asyncio.DatagramTransport, remote_addr: Tuple[str, int]) -> None:
+        """Используется сервером для привязки соединения к транспорту и адресу."""
+        self._transport = transport
+        self._remote_addr = remote_addr
+        self._init_components()
+
+    def on_packet(self, pkt: Packet) -> None:
+        """Вызывается серверным протоколом при получении пакета для этого соединения."""
+        self._handle_packet(pkt)
+
+    # ----------------------------- Внутренние методы -----------------------------
     def _init_components(self) -> None:
-        self._receiver = Receiver(self._deliver_data)
-        self._sender = Sender(
-            self._loop,
-            self._send_raw,
-            on_max_retransmit=self._on_max_retransmit
-        )
+        if self._receiver is None:
+            self._receiver = Receiver(self._deliver_data)
+        if self._sender is None:
+            self._sender = Sender(
+                self._loop,
+                self._send_raw,
+                on_max_retransmit=self._on_max_retransmit
+            )
 
     def _deliver_data(self, data: bytes) -> None:
         if self.on_data:
             self.on_data(data)
 
     def _send_packet(self, pkt: Packet) -> None:
-        if self._transport:
-            data = pkt.serialize()
-            if self._is_connected:
-                self._transport.sendto(data)
-            elif self._peer_addr:
-                self._transport.sendto(data, self._peer_addr)
+        """Отправить пакет через транспорт."""
+        if not self._transport:
+            return
+        data = pkt.serialize()
+        if self._client_mode:
+            # клиентский сокет уже знает адрес
+            self._transport.sendto(data)
+        else:
+            # серверное соединение – отправляем конкретному клиенту
+            self._transport.sendto(data, self._remote_addr)
 
     def _send_raw(self, data: bytes) -> None:
-        if self._transport:
-            if self._is_connected:
-                self._transport.sendto(data)
-            elif self._peer_addr:
-                self._transport.sendto(data, self._peer_addr)
+        """Колбэк для Sender – сырые данные."""
+        self._send_packet(Packet.deserialize(data))  # немного неэффективно, но работает
 
     def _send_keepalive(self) -> None:
         if self._state != ConnState.ESTABLISHED or not self._receiver:
@@ -168,53 +183,43 @@ class RUTPConnection:
         self._send_packet(ack)
 
     def _on_max_retransmit(self, seq: int) -> None:
-        """Вызывается при превышении лимита ретрансляций."""
         logger.error("Max retransmits exceeded, aborting connection")
-        if self.on_error:
-            self.on_error(MaxRetransmitsExceeded(f"Seq {seq}"))
-        self._reset_connection()
+        self.abort()
+        if self.on_close:
+            self.on_close(self)
 
-    def _check_version(self, pkt: Packet) -> bool:
-        """Возвращает True, если версия совместима (мажорная часть)."""
-        return (pkt.version & 0xFF00) == (PROTOCOL_VERSION & 0xFF00)
+    def _close_transport(self) -> None:
+        if self._transport and not self._transport.is_closing():
+            self._transport.close()
+        self._state = ConnState.CLOSED
+        if self.on_close:
+            self.on_close(self)
 
-    def _handle_packet(self, pkt: Packet, addr) -> None:
-        # Проверка мажорной версии (кроме SYN-пакетов, у них может быть установлен бит)
-        if not self._check_version(pkt) and not pkt.flags & FLAG_SYN:
-            # Несовместимая версия – отправить RST
+    def _handle_packet(self, pkt: Packet) -> None:
+        # ---- НОВЫЙ БЛОК: обработка SYN в состоянии CLOSED (сервер) ----
+        if self._state == ConnState.CLOSED and (pkt.flags & FLAG_SYN) and pkt.type == TYPE_CONTROL:
+            self._state = ConnState.SYN_RECEIVED
+            self._init_components()
+            self._receiver._next_expected = (pkt.seq_num + 1) % 2**32
+            syn_ack = Packet(
+                version=Packet.make_syn_version(),
+                type=TYPE_CONTROL,
+                flags=FLAG_SYN | FLAG_ACK,
+                seq_num=self._sender._next_seq,
+                ack_num=(pkt.seq_num + 1) % 2**32,
+                window=65535
+            )
+            self._send_packet(syn_ack)
+            self._sender._next_seq = (self._sender._next_seq + 1) % 2**32
+            return
+
+        # Проверка версии (упрощённо)
+        if (pkt.version & 0xFF00) != (PROTOCOL_VERSION & 0xFF00) and not (pkt.flags & FLAG_SYN):
             rst = Packet(type=TYPE_CONTROL, flags=FLAG_RST)
             self._send_packet(rst)
             return
 
-        if self._state == ConnState.LISTEN:
-            if pkt.flags & FLAG_RST:
-                return
-            if pkt.flags & FLAG_SYN:
-                self._peer_addr = addr
-                self._init_components()
-                self._peer_seq = pkt.seq_num
-                self._state = ConnState.SYN_RECEIVED
-                self._receiver._next_expected = (pkt.seq_num + 1) % 2**32
-                syn_ack = Packet(
-                    version=Packet.make_syn_version(),
-                    type=TYPE_CONTROL,
-                    flags=FLAG_SYN | FLAG_ACK,
-                    seq_num=self._sender._next_seq,
-                    ack_num=(pkt.seq_num + 1) % 2**32,
-                    window=65535
-                )
-                self._send_packet(syn_ack)
-                self._sender._next_seq = (self._sender._next_seq + 1) % 2**32
-                if self.on_connection:
-                    # Запускаем колбэк как задачу и сохраняем ссылку
-                    if asyncio.iscoroutinefunction(self.on_connection):
-                        task = asyncio.create_task(self._run_connection_handler(self.on_connection, self))
-                    else:
-                        task = asyncio.create_task(self._run_connection_handler_sync(self.on_connection, self))
-                    self._connection_tasks.add(task)
-                    task.add_done_callback(self._connection_tasks.discard)
-            return
-
+        # Состояния
         if self._state == ConnState.SYN_SENT:
             if pkt.flags & FLAG_RST:
                 self._close_transport()
@@ -231,39 +236,27 @@ class RUTPConnection:
                 self._send_packet(ack)
             return
 
-        if self._state in (ConnState.SYN_RECEIVED, ConnState.ESTABLISHED,
-                           ConnState.FIN_WAIT_1, ConnState.FIN_WAIT_2,
+        if self._state == ConnState.SYN_RECEIVED:
+            # Ждём ACK от клиента
+            if pkt.type == TYPE_ACK:
+                self._state = ConnState.ESTABLISHED
+            else:
+                # Если пришёл DATA, тоже переходим в ESTABLISHED (некоторые реализации)
+                self._state = ConnState.ESTABLISHED
+                # обработаем пакет как установленный
+                self._handle_established(pkt)
+            return
+
+        if self._state in (ConnState.ESTABLISHED, ConnState.FIN_WAIT_1, ConnState.FIN_WAIT_2,
                            ConnState.CLOSE_WAIT, ConnState.LAST_ACK):
             self._handle_established(pkt)
 
-    async def _run_connection_handler(self, handler, conn):
-        try:
-            await handler(conn)
-        except asyncio.CancelledError:
-            logger.debug("Connection handler cancelled")
-        except Exception as e:
-            logger.exception("Error in connection handler")
-            if self.on_error:
-                self.on_error(e)
-
-    async def _run_connection_handler_sync(self, handler, conn):
-        try:
-            handler(conn)
-        except Exception as e:
-            logger.exception("Error in connection handler")
-            if self.on_error:
-                self.on_error(e)
-
     def _handle_established(self, pkt: Packet) -> None:
         if pkt.flags & FLAG_RST:
-            self._reset_connection()
+            self._close_transport()
             return
 
-        if self._state == ConnState.SYN_RECEIVED:
-            self._state = ConnState.ESTABLISHED
-
         if pkt.flags & FLAG_FIN:
-            self._peer_seq = pkt.seq_num
             if self._state == ConnState.FIN_WAIT_1:
                 self._state = ConnState.TIME_WAIT
                 ack = Packet(type=TYPE_ACK, ack_num=(pkt.seq_num + 1) % 2**32,
@@ -292,7 +285,6 @@ class RUTPConnection:
                     start, end = struct.unpack('!II', data[i:i+8])
                     sack_blocks.append((start, end))
             self._sender.on_ack(pkt.ack_num, pkt.window, sack_blocks)
-            self._peer_window = pkt.window
             self._keepalive.start()
 
             if self._state == ConnState.FIN_WAIT_1:
@@ -307,21 +299,13 @@ class RUTPConnection:
                 self._send_packet(ack)
                 self._sender.set_recv_window(self._receiver.window_available())
 
-    def _reset_connection(self) -> None:
-        logger.debug("RST received or max retransmits, closing")
-        self._close_transport()
 
-
-class _RUTPProtocol(asyncio.DatagramProtocol):
-    def __init__(self, conn: RUTPConnection) -> None:
+class _RUTPClientProtocol(asyncio.DatagramProtocol):
+    """Протокол для клиентского сокета (просто передаёт пакеты в соединение)."""
+    def __init__(self, conn: RUTPConnection):
         self._conn = conn
-        super().__init__()
 
     def datagram_received(self, data: bytes, addr) -> None:
         pkt = Packet.deserialize(data)
         if pkt:
-            self._conn._handle_packet(pkt, addr)
-
-
-class MaxRetransmitsExceeded(Exception):
-    pass
+            self._conn._handle_packet(pkt)
