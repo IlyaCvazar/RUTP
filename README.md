@@ -1,5 +1,9 @@
 
-[![Russian](https://img.shields.io/badge/Русский-README-blue)](RU_README.md)
+<p align="center">
+  <a href="RU_README.md">
+    <img src="https://img.shields.io/badge/Русский-README-blue?style=for-the-badge&logo=readthedocs" alt="Русский">
+  </a>
+</p>
 # RUTP — Reliable UDP Transport Protocol
 
 **RUTP** is a custom reliable transport protocol over UDP, implemented in pure Python 3.7+ with `asyncio`.  
