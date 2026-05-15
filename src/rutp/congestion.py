@@ -46,9 +46,10 @@ class CongestionController:
 
     def _fast_retransmit(self) -> None:
         self.ssthresh = max(self.cwnd // 2, 2.0)
-        self.cwnd = self.ssthresh + 3  # RFC 2001 fast recovery
+        self.cwnd = self.ssthresh + 3
         self._recovery = True
-        logger.debug("Fast retransmit triggered, ssthresh=%d cwnd=%d", self.ssthresh, self.cwnd)
+        self.dup_ack_count = 0   # важно!
+        logger.debug(...)
 
     def on_loss(self) -> None:
         """Обработка тайм-аута (потеря пакета)."""

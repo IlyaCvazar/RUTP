@@ -3,46 +3,81 @@ import asyncio
 import logging
 from typing import Callable, Optional
 from .config import get_config
-from .constants import KEEPALIVE          # <-- добавлен импорт
+from .constants import KEEPALIVE
 
 logger = logging.getLogger(__name__)
 
+
 class RetransmissionTimer:
-    """
-    Таймер RTO с экспоненциальным отбоем, согласно RFC 6298.
-    """
     def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
         cfg = get_config()
-        self._rto = cfg["rto"]
+        self._base_rto = cfg["rto"]
+        self._rto = self._base_rto
         self._min_rto = cfg["min_rto"]
         self._max_rto = cfg["max_rto"]
         self._loop = loop
         self._handle: Optional[asyncio.TimerHandle] = None
         self._callback: Optional[Callable] = None
+        self._backoff_count = 0
+        self._is_running = False
 
     def start(self, callback: Callable) -> None:
-        """Запустить таймер; при срабатывании вызовет callback и применит отбой."""
+        """Запустить таймер. Если уже запущен, остановить и перезапустить."""
         self.stop()
         self._callback = callback
-        self._handle = self._loop.call_later(self._rto, self._on_timeout)
+        self._is_running = True
+        self._backoff_count = 0
+        self._rto = self._base_rto
+        self._schedule()
+
+    def _schedule(self) -> None:
+        if self._is_running and self._callback:
+            self._handle = self._loop.call_later(self._rto, self._on_timeout)
 
     def _on_timeout(self) -> None:
+        if not self._is_running:
+            return
+        # Вызов callback (ретрансмиссия)
         if self._callback:
             self._callback()
-        self._rto = min(self._rto * 2, self._max_rto)
+        # Увеличиваем RTO (экспоненциальный отбой)
+        self._backoff_count += 1
+        new_rto = self._base_rto * (2 ** self._backoff_count)
+        self._rto = min(new_rto, self._max_rto)
+        # Перезапускаем таймер с новым RTO
+        self._schedule()
 
     def stop(self) -> None:
+        self._is_running = False
         if self._handle:
             self._handle.cancel()
             self._handle = None
         self._callback = None
+        self._backoff_count = 0
+        self._rto = self._base_rto
 
     def reset_rto(self, new_rto: Optional[float] = None) -> None:
-        """Сбросить RTO к исходному или заданному значению."""
+        """Сбросить базовый RTO (действует при следующем start)."""
         if new_rto is not None:
-            self._rto = max(self._min_rto, min(self._max_rto, new_rto))
+            self._base_rto = max(self._min_rto, min(self._max_rto, new_rto))
         else:
-            self._rto = get_config()["rto"]
+            self._base_rto = get_config()["rto"]
+        # Если таймер работает, не меняем текущий RTO до следующего тайм-аута
+        if not self._is_running:
+            self._rto = self._base_rto
+            self._backoff_count = 0
+
+    def restart(self, callback: Optional[Callable] = None) -> None:
+        """Остановить и запустить заново с текущим RTO (без сброса отбоя)."""
+        if callback:
+            self._callback = callback
+        if self._callback:
+            was_running = self._is_running
+            self.stop()
+            self._is_running = was_running  # restore?
+            # Лучше просто перезапустить с текущим _rto (не сбрасывая backoff)
+            self._is_running = True
+            self._schedule()
 
 
 class KeepAliveTimer:

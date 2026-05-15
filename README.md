@@ -1,9 +1,4 @@
-<<<<<<< HEAD
-```markdown
-# RUTP – Reliable UDP Transport Protocol
-=======
 # RUTP — Reliable UDP Transport Protocol
->>>>>>> 4fac83c (Update README.md)
 
 **RUTP** is a custom reliable transport protocol over UDP, implemented in pure Python 3.7+ with `asyncio`.  
 It provides TCP-like reliability, congestion control, flow control, and selective acknowledgements, while remaining lightweight and embeddable.
@@ -12,16 +7,13 @@ It provides TCP-like reliability, congestion control, flow control, and selectiv
 
 - **Reliable delivery** – automatic retransmission with exponential backoff (RFC 6298)
 - **Congestion control** – NewReno algorithm (slow start, congestion avoidance, fast retransmit/recovery)
-- **Flow control** – receiver window advertisement and zero‑window probing
-- **Selective acknowledgements (SACK)** – up to 1000 reorder buffer blocks for efficient retransmission
+- **Flow control** – receiver window advertisement and **zero‑window probing** (persist timer)
+- **Selective acknowledgements (SACK)** – efficient retransmission using SACK blocks
 - **Keep‑alive** – periodic probes keep idle connections alive
 - **Asynchronous API** – built on `asyncio`, supports both client and server
 - **Pluggable parameters** – RTO, max retransmits, etc., configurable via environment variables
 
-<<<<<<< HEAD
 ## Installation
-=======
->>>>>>> 4fac83c (Update README.md)
 
 Requires Python 3.7 or later. No external dependencies.
 
@@ -56,9 +48,13 @@ async def handle_client(conn: RUTPConnection):
         while True:
             data = await queue.get()
             conn.send(data)   # echo back
-    except:
-        pass
-    finally:
+    except asyncio.CancelledError:
+        # Task cancelled – close connection
+        conn.close()
+        raise
+    except Exception as e:
+        # Log unexpected errors, then close
+        print(f"Unexpected error: {e}")
         conn.close()
 
 async def main():
@@ -95,146 +91,120 @@ async def main():
         print("Response:", bytes(received))
     except asyncio.TimeoutError:
         print("No response")
-    await client.close()
+    finally:
+        await client.close()
 
 asyncio.run(main())
 ```
 
-<<<<<<< HEAD
-## Documentation  
-Key classes and methods are summarised below:
-
-- **`RUTPConnection(loop, on_data=None)`** – main connection object. Methods: `listen(port)`, `connect(host, port)`, `send(data)`, `close()`.
-- **`Packet`** – serializable packet with fields: version, type, flags, seq_num, ack_num, window, payload.
-- **Constants** – protocol parameters in `rutp.constants`.
-
-## License
-
-This project is distributed under a custom license that requires **explicit attribution** – the protocol name **RUTP** and the creator's name must be visibly displayed in any product or service that uses or modifies this software. See [LICENSE.txt](LICENSE.txt) for full details.
-
-© 2026 Ilya [your surname]. All rights reserved.
-=======
-Запустите клиент в другом терминале:
-```bash
-python client.py
-```
-
-Вы должны увидеть эхо-ответ от сервера.
-
----
+Run the server in one terminal, then the client in another. You should see the echoed message.
 
 ## API
 
 ### RUTPConnection
 
-Класс `RUTPConnection` управляет жизненным циклом соединения.
+The `RUTPConnection` class manages the connection lifecycle.
 
-**Конструктор**
+**Constructor**
 ```python
 RUTPConnection(loop: asyncio.AbstractEventLoop, on_data: Optional[Callable[[bytes], None]] = None)
 ```
-- `loop` — event loop asyncio.
-- `on_data` — функция, вызываемая при получении новых данных. Можно задать и позже через атрибут `conn.on_data`.
+- `loop` – asyncio event loop.
+- `on_data` – callback when data is received. Can also be set later via `conn.on_data`.
 
-**Атрибуты**
-- `on_data` — Callable[[bytes], None] | None
-- `on_connection` — Callable[[RUTPConnection], None] | None  
-  Только для сервера: вызывается при входящем соединении, аргументом получает новый объект `RUTPConnection` для общения с клиентом.
+**Attributes**
+- `on_data` – Callable[[bytes], None] | None
+- `on_connection` – Callable[[RUTPConnection], None] | None  
+  Server only: called when an incoming connection is established; receives a new `RUTPConnection` object for that client.
 
-**Методы**
-- `await listen(port: int)` — открыть серверный UDP‑сокет на указанном порту.
-- `await connect(host: str, port: int)` — подключиться к серверу.
-- `send(data: bytes)` — отправить данные. Работает только в состоянии `ESTABLISHED`.
-- `await close()` — начать закрытие соединения (FIN-рукопожатие).
-- (внутренние) `_close_transport()` — принудительный разрыв.
+**Methods**
+- `await listen(port: int)` – start a server UDP socket on the given port.
+- `await connect(host: str, port: int)` – connect to a server.
+- `send(data: bytes)` – send data. Only works in `ESTABLISHED` state.
+- `await close()` – gracefully close the connection (FIN handshake).
+- (internal) `_close_transport()` – force close.
 
-**Состояния соединения** (перечисление `ConnState`):
+**Connection States** (`ConnState` enum):  
 `LISTEN`, `SYN_SENT`, `SYN_RECEIVED`, `ESTABLISHED`, `FIN_WAIT_1`, `FIN_WAIT_2`, `CLOSE_WAIT`, `LAST_ACK`, `TIME_WAIT`, `CLOSED`.
 
 ### Packet
 
-Класс `Packet` представляет wire-формат сообщения. Обычно не требуется создавать экземпляры вручную, но может быть полезен для отладки.
+The `Packet` class represents the wire format. Normally you don't need to instantiate manually.
 
-**Поля:**
+**Fields:**
 - `version` (int)
-- `type` (int) — `TYPE_DATA` (0x01), `TYPE_ACK` (0x02), `TYPE_CONTROL` (0x03)
-- `flags` (int) — битовая маска `FLAG_SYN`, `FLAG_ACK`, `FLAG_FIN`, `FLAG_RST`
+- `type` (int) – `TYPE_DATA` (0x01), `TYPE_ACK` (0x02), `TYPE_CONTROL` (0x03)
+- `flags` (int) – bitmask `FLAG_SYN`, `FLAG_ACK`, `FLAG_FIN`, `FLAG_RST`
 - `seq_num` (int)
 - `ack_num` (int)
 - `window` (int)
 - `payload` (bytes)
 
-**Методы:**
+**Methods:**
 - `serialize() -> bytes`
 - `Packet.deserialize(data: bytes) -> Optional[Packet]`
-- `is_syn_version(version: int) -> bool` (статический)
-- `make_syn_version(base_version: int = PROTOCOL_VERSION) -> int` (статический)
+- `is_syn_version(version: int) -> bool` (static)
+- `make_syn_version(base_version: int = PROTOCOL_VERSION) -> int` (static)
 
-### Константы и конфигурация
+### Constants and Configuration
 
-Все константы определены в модуле `rutp.constants`.  
-Параметры, изменяемые пользователем, читаются из переменных окружения (через `rutp.config.get_config()`):
+All constants are in `rutp.constants`.  
+User‑tunable parameters are read from environment variables via `rutp.config.get_config()`:
 
-| Переменная окружения     | По умолчанию | Описание                                  |
-|--------------------------|--------------|-------------------------------------------|
-| `RUTP_RTO`               | 1.0          | Базовый тайм-аут повторной передачи (сек) |
-| `RUTP_MIN_RTO`           | 0.2          | Минимальный RTO                           |
-| `RUTP_MAX_RTO`           | 60.0         | Максимальный RTO                          |
-| `RUTP_MAX_RETRANSMITS`   | 10           | Максимальное число попыток отправки пакета|
+| Environment variable | Default | Description |
+|----------------------|---------|-------------|
+| `RUTP_RTO`           | 1.0     | Base retransmission timeout (seconds) |
+| `RUTP_MIN_RTO`       | 0.2     | Minimum RTO |
+| `RUTP_MAX_RTO`       | 60.0    | Maximum RTO |
+| `RUTP_MAX_RETRANSMITS` | 10    | Max retransmission attempts per packet |
 
-Пример: для более агрессивной ретрансмиссии можно задать `RUTP_RTO=0.5 RUTP_MAX_RETRANSMITS=5 python server.py`.
+Example: for more aggressive retransmission, run  
+`RUTP_RTO=0.5 RUTP_MAX_RETRANSMITS=5 python server.py`
 
----
+## Protocol Architecture
 
-## Архитектура протокола
+### Handshake
 
-### Рукопожатие
+Three‑way handshake:
+1. Client → Server: `SYN` (seq=x)
+2. Server → Client: `SYN+ACK` (seq=y, ack=x+1)
+3. Client → Server: `ACK` (ack=y+1) – then both enter `ESTABLISHED`.
 
-Трёхстороннее рукопожатие:
+SYN packets are marked with the 15th bit of the version field (`VERSION_SYN_BIT`).
 
-1. Клиент → Сервер: `SYN` (seq=x)
-2. Сервер → Клиент: `SYN+ACK` (seq=y, ack=x+1)
-3. Клиент → Сервер: `ACK` (ack=y+1) — после этого обе стороны переходят в `ESTABLISHED`.
+### Data Transfer
 
-SYN‑пакет помечается 15-м битом поля версии (`VERSION_SYN_BIT`).
+Data passed to `send()` is split into segments of size `SAFE_PAYLOAD_IPV4` (548 bytes – the minimum guaranteed IPv4 datagram).  
+Each segment is assigned a 32‑bit sequence number (cyclic per RFC 1982). The receiver reassembles the stream in order, buffering out‑of‑order packets.
 
-### Передача данных
+### Congestion Control
 
-Данные, переданные через `send()`, нарезаются на сегменты размером `SAFE_PAYLOAD_IPV4` (548 байт — минимальная гарантированная датаграмма IPv4).  
-Каждый сегмент нумеруется 32‑битным порядковым номером, циклически (RFC 1982). Получатель собирает поток в правильном порядке, буферизуя неупорядоченные пакеты.
+Implements **NewReno** (RFC 5681):
+- **Slow start**: `cwnd` increases by 1 packet per ACK until `cwnd >= ssthresh`.
+- **Congestion avoidance**: `cwnd += 1/cwnd` per ACK.
+- **Fast retransmit**: upon receiving 3 duplicate ACKs, `ssthresh = max(cwnd/2, 2)`, `cwnd = ssthresh + 3`, and the lost packet is retransmitted without waiting for timeout.
+- **Timeout (loss)**: `ssthresh = max(cwnd/2, 2)`, `cwnd` reset to `INITIAL_CWND` (10).
 
-### Контроль перегрузки
+Retransmissions use exponential RTO backoff (`rto = min(rto*2, max_rto)`).
 
-Реализован алгоритм **NewReno** (RFC 5681):
+### Selective Acknowledgements (SACK)
 
-- **Медленный старт**: `cwnd` увеличивается на 1 пакет за ACK, пока `cwnd < ssthresh`.
-- **Избежание перегрузки**: `cwnd += 1/cwnd` за ACK.
-- **Быстрая ретрансмиссия**: при получении 3 дублированных ACK `ssthresh` уменьшается вдвое, `cwnd = ssthresh + 3`, выполняется повторная отправка потерянного пакета без тайм‑аута.
-- **Тайм‑аут (потеря)**: `ssthresh = max(cwnd/2, 2)`, `cwnd` сбрасывается до `INITIAL_CWND` (10).
+The receiver attaches SACK blocks to every ACK, describing continuous intervals of successfully received but not yet delivered segments. Each block is a pair `(start, end)` packed in big‑endian (`!II`). The sender uses SACK to mark acknowledged packets and avoid unnecessary retransmissions.
 
-Так же обрабатываются повторные передачи с экспоненциальным ростом RTO (`rto = min(rto*2, max_rto)`).
+### Flow Control and Zero‑Window Probing
 
-### Выборочные подтверждения (SACK)
+Each ACK carries a `window` field – the free space in the receiver’s buffer (up to `MAX_RECV_WINDOW = 65535` bytes).  
+The sender must not send data if the window is zero or if the total unacknowledged data plus the next segment would exceed the window.
 
-Приёмник формирует ACK, в котором помимо кумулятивного `ack_num` перечисляются блоки успешно полученных, но не доставленных по порядку сегментов (`SACK blocks`).  
-Каждый блок — пара `(start, end)`, упакованная в big‑endian (`!II`).  
-Отправитель использует SACK для отметки полученных сегментов, чтобы не перепосылать их, когда тайм‑аут срабатывает только для одного потерянного.
-
-### Управление потоком
-
-Каждый ACK содержит поле `window` — количество свободного места в приёмном буфере (до `MAX_RECV_WINDOW = 65535` байт).  
-Отправитель не должен посылать данные, если окно равно 0 или если суммарный объём неподтверждённых данных + размер следующего сегмента превышает объявленное окно.  
-Если окно долго равно 0, срабатывает **zero‑window probing** — сервер отправляет keep‑alive пакеты, чтобы разбудить получателя.
+If the window stays zero for a prolonged time, the sender activates a **persist timer** (zero‑window probing). It periodically sends a probe (a retransmission of the oldest unacknowledged segment or a keep‑alive) to check if the window has reopened. After too many failed probes, the connection is aborted.
 
 ### Keep‑alive
 
-Каждые `KEEPALIVE` секунд (по умолчанию 15) соединение отправляет пустой ACK, если линия простаивает. Это предотвращает разрыв соединения на промежуточных NAT‑маршрутизаторах.
+Every `KEEPALIVE` seconds (default 15), an idle connection sends an empty ACK to prevent stale NAT bindings.
 
----
+## Advanced Examples
 
-## Примеры
-
-### Многоклиентский сервер
+### Multi‑client Server
 
 ```python
 import asyncio
@@ -246,11 +216,13 @@ async def handle_client(conn):
     try:
         while True:
             data = await queue.get()
-            # обработайте data...
-            conn.send(data)   # эхо
-    except:
-        pass
-    finally:
+            # process data...
+            conn.send(data)   # echo
+    except asyncio.CancelledError:
+        conn.close()
+        raise
+    except Exception as e:
+        print(f"Client error: {e}")
         conn.close()
 
 async def main():
@@ -262,59 +234,53 @@ async def main():
 asyncio.run(main())
 ```
 
-### Передача файла
+### File Transfer
 
 ```python
-# клиент
+# Client
 with open('myfile.bin', 'rb') as f:
     client.send(f.read())
 ```
 
-Протокол сам нарежет данные, отправит, перепошлёт потерянные куски и доставит приёмнику в правильном порядке.
+The protocol automatically segments, retransmits lost parts, and reassembles in order at the receiver.
 
----
+## Testing
 
-## Тестирование
-
-В директории `tests/` находятся unit‑тесты. Установите `pytest` и запустите:
+Unit tests are in the `tests/` directory. Install `pytest` and run:
 
 ```bash
 pip install pytest
 pytest tests/
 ```
 
-Тесты покрывают:
-- Арифметику последовательностей (wraparound)
-- Сериализацию/десериализацию пакетов
-- Перегрузку (NewReno)
-- Таймеры RTO и keep‑alive
-- Приёмник и буферизацию
-- Отправитель и его взаимодействие с окном получателя
-- Полное рукопожатие и передачу данных
+Tests cover:
+- Sequence number arithmetic (wraparound)
+- Packet serialization/deserialization
+- Congestion control (NewReno)
+- RTO and keep‑alive timers
+- Receiver buffering and SACK generation
+- Sender window management and persist timer
+- Full handshake and data transfer
 
----
+## License and Attribution
 
-## Лицензия и атрибуция
+This project is distributed under the **RUTP License**, which **requires explicit attribution**:
 
-Этот проект распространяется под специальной лицензией **RUTP License**, которая **требует явного указания**:
+- the protocol name: **RUTP (Reliable UDP Transport Protocol)**;
+- the creator's name: **Ilya Okolelov** (Илья Околелов).
 
-- названия протокола: **RUTP (Reliable UDP Transport Protocol)**,
-- имени создателя: **Илья Околелов**.
+The attribution must be placed in the documentation, program interface, or another conspicuous place visible to the end user.  
+Full license text: [LICENSE.txt](LICENSE.txt)
 
-Уведомление должно быть видимым для конечного пользователя (документация, интерфейс, экран загрузки и т.п.).  
-Полный текст лицензии: файл [LICENSE.txt](LICENSE.txt).
+© 2026 Ilya Okolelov. All rights reserved.
 
-© 2026 Илья Александрович. Все права защищены.
+## Development
 
----
+Source code is open. Feel free to submit pull requests. Ensure that changes are covered by tests and do not break existing protocol behaviour.
 
-## Разработка
-
-Исходный код открыт. Вы можете предлагать улучшения через pull‑запросы. Убедитесь, что добавленные изменения покрыты тестами и не нарушают работу существующего протокола.
-
-Структура проекта:
+Project structure:
 ```
-├── src/rutp/        # пакет протокола
+├── src/rutp/        # protocol package
 │   ├── __init__.py
 │   ├── config.py
 │   ├── congestion.py
@@ -326,14 +292,13 @@ pytest tests/
 │   ├── sender.py
 │   ├── timers.py
 │   └── utils.py
-├── tests/           # тесты
+├── tests/           # tests
 ├── pyproject.toml
 ├── LICENSE.txt
 └── README.md
-
-## Вопросы и обратная связь
-
-Если у вас возникли проблемы или предложения, создавайте issue в репозитории проекта.  
-Автор: Илья (github: IlyaCvazar)
->>>>>>> 4fac83c (Update README.md)
 ```
+
+## Questions and Feedback
+
+Open an issue on GitHub.  
+Author: Ilya (github: IlyaCvazar)
