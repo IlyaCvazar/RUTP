@@ -1,4 +1,5 @@
 
+[![Russian](https://img.shields.io/badge/Русский-README-blue)](RU_README.md)
 # RUTP — Reliable UDP Transport Protocol
 
 **RUTP** is a custom reliable transport protocol over UDP, implemented in pure Python 3.7+ with `asyncio`.  
@@ -55,8 +56,9 @@ async def handle_client(conn: RUTPConnection):
         raise
 
 async def main():
-    loop = asyncio.get_event_loop()
-    server = RUTPServer(loop, on_connection=handle_client)
+    loop = asyncio.get_running_loop()
+    # Important: wrap async handler in a lambda that creates a task
+    server = RUTPServer(loop, on_connection=lambda conn: asyncio.create_task(handle_client(conn)))
     await server.listen(9000)
     print("Server listening on port 9000")
     await asyncio.Event().wait()
@@ -71,7 +73,7 @@ import asyncio
 from rutp import RUTPConnection
 
 async def main():
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     client = RUTPConnection(loop)
     # Wait for handshake completion (you can use asyncio.Event or a simple sleep)
     await client.connect('127.0.0.1', 9000)
@@ -109,7 +111,8 @@ A server that listens for incoming connections and creates a separate `RUTPConne
 RUTPServer(loop: asyncio.AbstractEventLoop, on_connection: Callable[[RUTPConnection], None])
 ```
 - `loop` – asyncio event loop.
-- `on_connection` – called when a new connection is established; receives the new `RUTPConnection` instance.
+- `on_connection` – called when a new connection is established; receives the new `RUTPConnection` instance.  
+  **Note:** If your handler is an `async def` coroutine, you must wrap it in `asyncio.create_task` (e.g. `lambda conn: asyncio.create_task(my_handler(conn))`).
 
 **Methods**
 - `await listen(port: int)` – start listening on the given UDP port.
@@ -308,3 +311,4 @@ Project structure:
 
 Open an issue on GitHub.  
 Author: Ilya (github: IlyaCvazar)
+

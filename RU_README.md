@@ -1,4 +1,5 @@
 
+[![English](https://img.shields.io/badge/English-README-blue)](README.md)
 # RUTP — простой и надёжный протокол поверх UDP
 
 **RUTP** (Reliable UDP Transport Protocol) — это библиотека на Python, которая добавляет **надёжность** и **управление потоком** к обычному протоколу UDP.  
@@ -43,26 +44,23 @@ import asyncio
 from rutp import RUTPServer, RUTPConnection
 
 async def handle_client(conn: RUTPConnection):
-    """
-    Обработчик одного подключения.
-    """
     queue = asyncio.Queue()
-    conn.on_data = lambda data: queue.put_nowait(data)  # сохраняем полученные данные в очередь
-
+    conn.on_data = lambda data: queue.put_nowait(data)
     try:
         while True:
             data = await queue.get()
-            conn.send(data)   # отправляем обратно (эхо)
+            conn.send(data)   # эхо
     except asyncio.CancelledError:
-        conn.close()          # при отмене задачи закрываем соединение
+        conn.close()
         raise
 
 async def main():
     loop = asyncio.get_running_loop()
-    server = RUTPServer(loop, on_connection=handle_client)
+    # Важно: обёртываем корутину в create_task
+    server = RUTPServer(loop, on_connection=lambda conn: asyncio.create_task(handle_client(conn)))
     await server.listen(8888)
     print("Сервер запущен на порту 8888")
-    await asyncio.Event().wait()   # бесконечное ожидание
+    await asyncio.Event().wait()
 
 asyncio.run(main())
 ```
@@ -71,17 +69,15 @@ asyncio.run(main())
 
 ```python
 import asyncio
-from rutp import RUTPConnection, ConnState
+from rutp import RUTPConnection
 
 async def main():
     loop = asyncio.get_running_loop()
     client = RUTPConnection(loop)
 
-    # Подключаемся и ждём завершения рукопожатия (простейший способ – небольшая задержка)
     await client.connect('127.0.0.1', 8888)
-    await asyncio.sleep(0.1)   # даём время на обмен SYN, SYN-ACK, ACK
+    await asyncio.sleep(0.1)   # ждём завершения рукопожатия
 
-    # Назначаем обработчик входящих данных
     received = bytearray()
     done = asyncio.Event()
     client.on_data = lambda d: (received.extend(d), done.set())
@@ -108,7 +104,9 @@ server = RUTPServer(loop, on_connection=обработчик)
 await server.listen(порт)
 ```
 
-- `on_connection` – функция, которая будет вызвана для **каждого нового подключения**. Ей передаётся объект `RUTPConnection` (соединение с клиентом).
+- `on_connection` – вызывается для каждого нового подключения. Получает объект `RUTPConnection`.  
+  **Важно:** если ваш обработчик — корутина (`async def`), оберните его в `asyncio.create_task`, например:  
+  `RUTPServer(loop, on_connection=lambda conn: asyncio.create_task(my_handler(conn)))`.
 - `listen(port)` – начинает слушать UDP-порт.
 
 ### `RUTPConnection` – одно соединение
@@ -286,4 +284,3 @@ RUTP распространяется под **лицензией RUTP**, кот
 ## Вопросы и обратная связь
 
 Задавайте вопросы через Issues на GitHub: [IlyaCvazar/RUTP](https://github.com/IlyaCvazar/RUTP)
-
