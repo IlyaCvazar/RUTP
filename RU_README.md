@@ -146,12 +146,13 @@ conn = RUTPConnection(loop, on_data=обработчик_данных)
 **Сервер** (сохраняет пользователей и пересылает сообщения):
 
 ```python
-import asyncio, json
+import asyncio
+import json
 from rutp import RUTPServer, RUTPConnection
 
-users = {}          # имя -> соединение
+users = {}
 
-async def client_handler(conn):
+async def client_handler(conn: RUTPConnection):
     queue = asyncio.Queue()
     conn.on_data = lambda d: queue.put_nowait(d)
     username = None
@@ -168,6 +169,8 @@ async def client_handler(conn):
                 target = msg['to']
                 if target in users:
                     users[target].send(json.dumps({'from': username, 'text': msg['text']}).encode())
+                else:
+                    conn.send(json.dumps({'type': 'error', 'message': f'User {target} not found'}).encode())
     except asyncio.CancelledError:
         if username:
             users.pop(username, None)
@@ -176,7 +179,7 @@ async def client_handler(conn):
 
 async def main():
     loop = asyncio.get_running_loop()
-    server = RUTPServer(loop, on_connection=client_handler)
+    server = RUTPServer(loop, on_connection=lambda conn: asyncio.create_task(client_handler(conn)))
     await server.listen(8888)
     await asyncio.Event().wait()
 
@@ -186,45 +189,52 @@ asyncio.run(main())
 **Клиент** (консольный):
 
 ```python
-import asyncio, json, sys
-from rutp import RUTPConnection, ConnState
+import asyncio
+import json
+import sys
+from rutp import RUTPConnection
 
 async def main():
     loop = asyncio.get_running_loop()
     client = RUTPConnection(loop)
     await client.connect('127.0.0.1', 8888)
-    await asyncio.sleep(0.1)
+    await asyncio.sleep(0.1)  # ждём завершения handshake
 
-    # Функция для чтения строки без блокировки
-    reader = asyncio.StreamReader()
-    asyncio.create_task(asyncio.stdin_reader(reader))
+    queue = asyncio.Queue()
+    client.on_data = lambda data: queue.put_nowait(data)
 
     async def receive():
         while True:
             data = await queue.get()
-            msg = json.loads(data.decode())
-            if 'from' in msg:
-                print(f"\n[Сообщение от {msg['from']}]: {msg['text']}\n> ", end='', flush=True)
+            try:
+                msg = json.loads(data.decode())
+                if 'from' in msg:
+                    print(f"\n[Сообщение от {msg['from']}]: {msg['text']}\n> ", end='', flush=True)
+                elif msg.get('type') == 'ok':
+                    print(f"\n[OK] {msg['message']}\n> ", end='', flush=True)
+            except:
+                pass
 
-    queue = asyncio.Queue()
-    client.on_data = queue.put_nowait
     asyncio.create_task(receive())
 
-    print("Чат. Команды: /reg <имя>, /send <кому> <текст>, /exit")
+    async def ainput():
+        return await loop.run_in_executor(None, sys.stdin.readline)
+
+    print("Чат. Команды: reg <имя>, send <кому> <текст>, exit")
     while True:
-        line = await reader.readline()
+        line = await ainput()
         if not line:
             break
-        line = line.decode().strip()
-        if line.startswith('/reg'):
+        line = line.strip()
+        if line.startswith('reg '):
             name = line.split()[1]
             client.send(json.dumps({'cmd': 'register', 'username': name}).encode())
-        elif line.startswith('/send'):
+        elif line.startswith('send '):
             parts = line.split(maxsplit=2)
             if len(parts) == 3:
                 _, to, text = parts
                 client.send(json.dumps({'cmd': 'message', 'to': to, 'text': text}).encode())
-        elif line == '/exit':
+        elif line == 'exit':
             break
 
     await client.close()
