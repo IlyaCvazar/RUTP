@@ -1,3 +1,4 @@
+
 # RUTP — Reliable UDP Transport Protocol
 
 **RUTP** is a custom reliable transport protocol over UDP, implemented in pure Python 3.7+ with `asyncio`.  
@@ -10,7 +11,8 @@ It provides TCP-like reliability, congestion control, flow control, and selectiv
 - **Flow control** – receiver window advertisement and **zero‑window probing** (persist timer)
 - **Selective acknowledgements (SACK)** – efficient retransmission using SACK blocks
 - **Keep‑alive** – periodic probes keep idle connections alive
-- **Asynchronous API** – built on `asyncio`, supports both client and server
+- **Asynchronous API** – built on `asyncio`
+- **Multi‑client server** – `RUTPServer` manages multiple simultaneous connections
 - **Pluggable parameters** – RTO, max retransmits, etc., configurable via environment variables
 
 ## Installation
@@ -35,11 +37,11 @@ pip install rutp-1.0.0-*.whl
 
 ## Quick Start
 
-### Echo Server
+### Echo Server (multi‑client)
 
 ```python
 import asyncio
-from rutp import RUTPConnection
+from rutp import RUTPServer, RUTPConnection
 
 async def handle_client(conn: RUTPConnection):
     queue = asyncio.Queue()
@@ -49,18 +51,12 @@ async def handle_client(conn: RUTPConnection):
             data = await queue.get()
             conn.send(data)   # echo back
     except asyncio.CancelledError:
-        # Task cancelled – close connection
         conn.close()
         raise
-    except Exception as e:
-        # Log unexpected errors, then close
-        print(f"Unexpected error: {e}")
-        conn.close()
 
 async def main():
     loop = asyncio.get_event_loop()
-    server = RUTPConnection(loop)
-    server.on_connection = handle_client
+    server = RUTPServer(loop, on_connection=handle_client)
     await server.listen(9000)
     print("Server listening on port 9000")
     await asyncio.Event().wait()
@@ -75,13 +71,16 @@ import asyncio
 from rutp import RUTPConnection
 
 async def main():
-    client = RUTPConnection(asyncio.get_event_loop())
+    loop = asyncio.get_event_loop()
+    client = RUTPConnection(loop)
+    # Wait for handshake completion (you can use asyncio.Event or a simple sleep)
+    await client.connect('127.0.0.1', 9000)
+    await asyncio.sleep(0.1)   # allow handshake to finish
+
     received = bytearray()
     done = asyncio.Event()
     client.on_data = lambda d: (received.extend(d), done.set())
 
-    await client.connect('127.0.0.1', 9000)
-    await asyncio.sleep(0.1)   # wait for handshake
     message = "Hello, RUTP!".encode()
     print("Sending:", message)
     client.send(message)
@@ -101,35 +100,47 @@ Run the server in one terminal, then the client in another. You should see the e
 
 ## API
 
-### RUTPConnection
+### `RUTPServer`
 
-The `RUTPConnection` class manages the connection lifecycle.
+A server that listens for incoming connections and creates a separate `RUTPConnection` for each client.
+
+**Constructor**
+```python
+RUTPServer(loop: asyncio.AbstractEventLoop, on_connection: Callable[[RUTPConnection], None])
+```
+- `loop` – asyncio event loop.
+- `on_connection` – called when a new connection is established; receives the new `RUTPConnection` instance.
+
+**Methods**
+- `await listen(port: int)` – start listening on the given UDP port.
+
+### `RUTPConnection`
+
+Represents a single connection (client‑side or a server‑accepted connection).
 
 **Constructor**
 ```python
 RUTPConnection(loop: asyncio.AbstractEventLoop, on_data: Optional[Callable[[bytes], None]] = None)
 ```
 - `loop` – asyncio event loop.
-- `on_data` – callback when data is received. Can also be set later via `conn.on_data`.
+- `on_data` – optional callback for received data.
 
 **Attributes**
-- `on_data` – Callable[[bytes], None] | None
-- `on_connection` – Callable[[RUTPConnection], None] | None  
-  Server only: called when an incoming connection is established; receives a new `RUTPConnection` object for that client.
+- `on_data` – set or change the data callback at any time.
+- `on_close` – optional callback called when the connection is closed.
 
 **Methods**
-- `await listen(port: int)` – start a server UDP socket on the given port.
-- `await connect(host: str, port: int)` – connect to a server.
-- `send(data: bytes)` – send data. Only works in `ESTABLISHED` state.
+- `await connect(host: str, port: int)` – initiate a connection to a server.
+- `send(data: bytes)` – send data (only in `ESTABLISHED` state).
 - `await close()` – gracefully close the connection (FIN handshake).
-- (internal) `_close_transport()` – force close.
+- `abort()` – force‑close the connection without sending FIN.
 
 **Connection States** (`ConnState` enum):  
-`LISTEN`, `SYN_SENT`, `SYN_RECEIVED`, `ESTABLISHED`, `FIN_WAIT_1`, `FIN_WAIT_2`, `CLOSE_WAIT`, `LAST_ACK`, `TIME_WAIT`, `CLOSED`.
+`CLOSED`, `SYN_SENT`, `SYN_RECEIVED`, `ESTABLISHED`, `FIN_WAIT_1`, `FIN_WAIT_2`, `CLOSE_WAIT`, `LAST_ACK`, `TIME_WAIT`.
 
-### Packet
+### `Packet`
 
-The `Packet` class represents the wire format. Normally you don't need to instantiate manually.
+Wire format representation. Normally you don’t need to instantiate manually.
 
 **Fields:**
 - `version` (int)
@@ -204,45 +215,41 @@ Every `KEEPALIVE` seconds (default 15), an idle connection sends an empty ACK to
 
 ## Advanced Examples
 
-### Multi‑client Server
-
-```python
-import asyncio
-from rutp import RUTPConnection
-
-async def handle_client(conn):
-    queue = asyncio.Queue()
-    conn.on_data = queue.put_nowait
-    try:
-        while True:
-            data = await queue.get()
-            # process data...
-            conn.send(data)   # echo
-    except asyncio.CancelledError:
-        conn.close()
-        raise
-    except Exception as e:
-        print(f"Client error: {e}")
-        conn.close()
-
-async def main():
-    server = RUTPConnection(asyncio.get_event_loop())
-    server.on_connection = lambda conn: asyncio.create_task(handle_client(conn))
-    await server.listen(9000)
-    await asyncio.Event().wait()
-
-asyncio.run(main())
-```
-
 ### File Transfer
 
+**Client:**
 ```python
-# Client
 with open('myfile.bin', 'rb') as f:
     client.send(f.read())
 ```
 
 The protocol automatically segments, retransmits lost parts, and reassembles in order at the receiver.
+
+### Handling Handshake Completion Properly
+
+Instead of `asyncio.sleep`, you can wait for the `ESTABLISHED` state:
+
+```python
+import asyncio
+from rutp import RUTPConnection, ConnState
+
+class MyClient:
+    def __init__(self, loop):
+        self.conn = RUTPConnection(loop)
+        self.connected = asyncio.Event()
+
+    async def connect(self, host, port):
+        asyncio.create_task(self._watch_state())
+        await self.conn.connect(host, port)
+        await self.connected.wait()
+
+    async def _watch_state(self):
+        while True:
+            if self.conn._state == ConnState.ESTABLISHED:
+                self.connected.set()
+                break
+            await asyncio.sleep(0.05)
+```
 
 ## Testing
 
@@ -276,8 +283,6 @@ Full license text: [LICENSE.txt](LICENSE.txt)
 
 ## Development
 
-Source code is open. Feel free to submit pull requests. Ensure that changes are covered by tests and do not break existing protocol behaviour.
-
 Project structure:
 ```
 ├── src/rutp/        # protocol package
@@ -290,6 +295,7 @@ Project structure:
 │   ├── packet.py
 │   ├── receiver.py
 │   ├── sender.py
+│   ├── server.py
 │   ├── timers.py
 │   └── utils.py
 ├── tests/           # tests
