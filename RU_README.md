@@ -4,6 +4,7 @@
     <img src="https://img.shields.io/badge/English-README-blue?style=for-the-badge&logo=readthedocs" alt="English">
   </a>
 </p>
+
 # RUTP — простой и надёжный протокол поверх UDP
 
 **RUTP** (Reliable UDP Transport Protocol) — это библиотека на Python, которая добавляет **надёжность** и **управление потоком** к обычному протоколу UDP.  
