@@ -11,7 +11,7 @@ and/or sell copies of the Software, and to permit persons to whom the Software i
 
 2. Any use of the Software, its modifications or derivative works within other products or services, as well as any public distribution, MUST explicitly state:
    - the protocol name: "RUTP (Reliable UDP Transport Protocol)";
-   - the creator's name: "Ilya Okolelov" (replace with your full name).
+   - the creator's name: "Ilya Okolelov".
 
    Such attribution shall be placed in the documentation, the program's user interface, or in another conspicuous manner that allows the end user to clearly identify the protocol and its author.
 
@@ -40,7 +40,7 @@ Copyright (c) 2026 Околелов Илья Александрович
 производных работ в составе других продуктов или сервисов, а также при любом
 публичном распространении, ДОЛЖНО быть явно указано:
    - название протокола: «RUTP (Reliable UDP Transport Protocol)»;
-   - имя создателя: «Илья Околелов» (замените на своё полное имя).
+   - имя создателя: «Илья Околелов».
 
    Данное указание должно быть размещено в документации, интерфейсе программы
    или иным заметным образом, позволяющим конечному пользователю однозначно
